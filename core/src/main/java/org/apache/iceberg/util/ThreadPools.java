@@ -1,0 +1,144 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.iceberg.util;
+
+import java.time.Duration;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import org.apache.iceberg.SystemConfigs;
+import org.apache.iceberg.relocated.com.google.common.util.concurrent.MoreExecutors;
+import org.apache.iceberg.relocated.com.google.common.util.concurrent.ThreadFactoryBuilder;
+
+public class ThreadPools {
+
+  private ThreadPools() {}
+
+  public static final int WORKER_THREAD_POOL_SIZE = SystemConfigs.WORKER_THREAD_POOL_SIZE.value();
+
+  private static final ExecutorService WORKER_POOL =
+      newExitingWorkerPool("iceberg-worker-pool", WORKER_THREAD_POOL_SIZE);
+
+  public static final int DELETE_WORKER_THREAD_POOL_SIZE =
+      SystemConfigs.DELETE_WORKER_THREAD_POOL_SIZE.value();
+
+  private static final ExecutorService DELETE_WORKER_POOL =
+      newExitingWorkerPool("iceberg-delete-worker-pool", DELETE_WORKER_THREAD_POOL_SIZE);
+
+  public static final int AUTH_REFRESH_THREAD_POOL_SIZE =
+      SystemConfigs.AUTH_REFRESH_THREAD_POOL_SIZE.value();
+
+  /**
+   * Return an {@link ExecutorService} that uses the "worker" thread-pool.
+   *
+   * <p>The size of the worker pool limits the number of tasks concurrently reading manifests in the
+   * base table implementation across all concurrent planning operations.
+   *
+   * <p>The size of this thread-pool is controlled by the Java system property {@code
+   * iceberg.worker.num-threads}.
+   *
+   * @return an {@link ExecutorService} that uses the worker pool
+   */
+  public static ExecutorService getWorkerPool() {
+    return WORKER_POOL;
+  }
+
+  /**
+   * Return an {@link ExecutorService} that uses the "delete worker" thread-pool.
+   *
+   * <p>The size of this worker pool limits the number of tasks concurrently reading delete files
+   * within a single JVM. If there are multiple threads loading deletes, all of them will share this
+   * worker pool by default.
+   *
+   * <p>The size of this thread-pool is controlled by the Java system property {@code
+   * iceberg.worker.delete-num-threads}.
+   *
+   * @return an {@link ExecutorService} that uses the delete worker pool
+   */
+  public static ExecutorService getDeleteWorkerPool() {
+    return DELETE_WORKER_POOL;
+  }
+
+  /**
+   * A shared {@link ScheduledExecutorService} that REST catalogs can use for refreshing their
+   * authentication data.
+   */
+  public static ScheduledExecutorService authRefreshPool() {
+    return AuthRefreshPoolHolder.INSTANCE;
+  }
+
+  private static class AuthRefreshPoolHolder {
+    private static final ScheduledExecutorService INSTANCE =
+        ThreadPools.newExitingScheduledPool(
+            "auth-session-refresh", AUTH_REFRESH_THREAD_POOL_SIZE, Duration.ZERO);
+  }
+
+  /**
+   * Creates a fixed-size thread pool that uses daemon threads and registers a shutdown hook to
+   * ensure the pool terminates when the JVM exits. This is suitable for long-lived thread pools
+   * that should be automatically cleaned up on JVM shutdown.
+   */
+  public static ExecutorService newExitingWorkerPool(String namePrefix, int poolSize) {
+    return MoreExecutors.getExitingExecutorService(
+        (ThreadPoolExecutor) newFixedThreadPool(namePrefix, poolSize));
+  }
+
+  /** Creates a fixed-size thread pool that uses daemon threads. */
+  public static ExecutorService newFixedThreadPool(String namePrefix, int poolSize) {
+    return Executors.newFixedThreadPool(poolSize, newDaemonThreadFactory(namePrefix));
+  }
+
+  /**
+   * Create a new {@link ScheduledExecutorService} with the given name and pool size.
+   *
+   * <p>Threads used by this service will be daemon threads.
+   *
+   * @param namePrefix a base name for threads in the executor service's thread pool
+   * @param poolSize max number of threads to use
+   * @return an executor service
+   */
+  public static ScheduledExecutorService newScheduledPool(String namePrefix, int poolSize) {
+    return new ScheduledThreadPoolExecutor(poolSize, newDaemonThreadFactory(namePrefix));
+  }
+
+  /**
+   * Create a new {@link ScheduledExecutorService} with the given name and pool size.
+   *
+   * <p>Threads used by this service will be daemon threads.
+   *
+   * <p>The service registers a shutdown hook to ensure that it terminates when the JVM exits. This
+   * is suitable for long-lived thread pools that should be automatically cleaned up on JVM
+   * shutdown.
+   */
+  public static ScheduledExecutorService newExitingScheduledPool(
+      String namePrefix, int poolSize, Duration terminationTimeout) {
+    return MoreExecutors.getExitingScheduledExecutorService(
+        (ScheduledThreadPoolExecutor) newScheduledPool(namePrefix, poolSize),
+        terminationTimeout.toMillis(),
+        TimeUnit.MILLISECONDS);
+  }
+
+  private static ThreadFactory newDaemonThreadFactory(String namePrefix) {
+    return new ThreadFactoryBuilder().setDaemon(true).setNameFormat(namePrefix + "-%d").build();
+  }
+}
