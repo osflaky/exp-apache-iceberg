@@ -1,0 +1,677 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.iceberg.rest.responses;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assumptions.assumeThat;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import java.util.List;
+import java.util.Map;
+import org.apache.iceberg.ImmutableFieldLabel;
+import org.apache.iceberg.ImmutableLabels;
+import org.apache.iceberg.PartitionSpec;
+import org.apache.iceberg.Schema;
+import org.apache.iceberg.SortOrder;
+import org.apache.iceberg.TableMetadata;
+import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
+import org.apache.iceberg.rest.ImmutableRemoteSigningConfig;
+import org.apache.iceberg.rest.credentials.ImmutableCredential;
+import org.apache.iceberg.types.Types;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.FieldSource;
+
+public class TestLoadTableResponseParser {
+
+  @Test
+  public void nullAndEmptyCheck() {
+    assertThatThrownBy(() -> LoadTableResponseParser.toJson(null))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Invalid load table response: null");
+
+    assertThatThrownBy(() -> LoadTableResponseParser.fromJson((JsonNode) null))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Cannot parse load table response from null object");
+
+    assertThatThrownBy(() -> LoadTableResponseParser.fromJson("{}"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Cannot parse missing field: metadata");
+  }
+
+  @Test
+  public void missingFields() {
+    assertThatThrownBy(
+            () -> LoadTableResponseParser.fromJson("{\"metadata-location\": \"custom-location\"}"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessage("Cannot parse missing field: metadata");
+  }
+
+  @Test
+  public void roundTripSerdeV1() {
+    String uuid = "386b9f01-002b-4d8c-b77f-42c3fd3b7c9b";
+    TableMetadata metadata =
+        TableMetadata.buildFromEmpty(1)
+            .assignUUID(uuid)
+            .setLocation("location")
+            .setCurrentSchema(
+                new Schema(Types.NestedField.required(1, "x", Types.LongType.get())), 1)
+            .addPartitionSpec(PartitionSpec.unpartitioned())
+            .addSortOrder(SortOrder.unsorted())
+            .discardChanges()
+            .withMetadataLocation("metadata-location")
+            .build();
+
+    LoadTableResponse response = LoadTableResponse.builder().withTableMetadata(metadata).build();
+
+    String expectedJson =
+        String.format(
+            "{\n"
+                + "  \"metadata-location\" : \"metadata-location\",\n"
+                + "  \"metadata\" : {\n"
+                + "    \"format-version\" : 1,\n"
+                + "    \"table-uuid\" : \"386b9f01-002b-4d8c-b77f-42c3fd3b7c9b\",\n"
+                + "    \"location\" : \"location\",\n"
+                + "    \"last-updated-ms\" : %s,\n"
+                + "    \"last-column-id\" : 1,\n"
+                + "    \"schema\" : {\n"
+                + "      \"type\" : \"struct\",\n"
+                + "      \"schema-id\" : 0,\n"
+                + "      \"fields\" : [ {\n"
+                + "        \"id\" : 1,\n"
+                + "        \"name\" : \"x\",\n"
+                + "        \"required\" : true,\n"
+                + "        \"type\" : \"long\"\n"
+                + "      } ]\n"
+                + "    },\n"
+                + "    \"current-schema-id\" : 0,\n"
+                + "    \"schemas\" : [ {\n"
+                + "      \"type\" : \"struct\",\n"
+                + "      \"schema-id\" : 0,\n"
+                + "      \"fields\" : [ {\n"
+                + "        \"id\" : 1,\n"
+                + "        \"name\" : \"x\",\n"
+                + "        \"required\" : true,\n"
+                + "        \"type\" : \"long\"\n"
+                + "      } ]\n"
+                + "    } ],\n"
+                + "    \"partition-spec\" : [ ],\n"
+                + "    \"default-spec-id\" : 0,\n"
+                + "    \"partition-specs\" : [ {\n"
+                + "      \"spec-id\" : 0,\n"
+                + "      \"fields\" : [ ]\n"
+                + "    } ],\n"
+                + "    \"last-partition-id\" : 999,\n"
+                + "    \"default-sort-order-id\" : 0,\n"
+                + "    \"sort-orders\" : [ {\n"
+                + "      \"order-id\" : 0,\n"
+                + "      \"fields\" : [ ]\n"
+                + "    } ],\n"
+                + "    \"properties\" : { },\n"
+                + "    \"current-snapshot-id\" : -1,\n"
+                + "    \"refs\" : { },\n"
+                + "    \"snapshots\" : [ ],\n"
+                + "    \"statistics\" : [ ],\n"
+                + "    \"partition-statistics\" : [ ],\n"
+                + "    \"snapshot-log\" : [ ],\n"
+                + "    \"metadata-log\" : [ ]\n"
+                + "  }\n"
+                + "}",
+            metadata.lastUpdatedMillis());
+    String json = LoadTableResponseParser.toJson(response, true);
+    assertThat(json).isEqualTo(expectedJson);
+    // can't do an equality comparison because Schema doesn't implement equals/hashCode
+    assertThat(LoadTableResponseParser.toJson(LoadTableResponseParser.fromJson(json), true))
+        .isEqualTo(expectedJson);
+  }
+
+  @ParameterizedTest
+  @FieldSource("org.apache.iceberg.TestHelpers#ALL_VERSIONS")
+  public void roundTripSerdeV3andHigher(int formatVersion) {
+    assumeThat(formatVersion).isGreaterThanOrEqualTo(3);
+
+    String uuid = "386b9f01-002b-4d8c-b77f-42c3fd3b7c9b";
+    TableMetadata metadata =
+        TableMetadata.buildFromEmpty(formatVersion)
+            .assignUUID(uuid)
+            .setLocation("file://location")
+            .setCurrentSchema(
+                new Schema(Types.NestedField.required(1, "x", Types.LongType.get())), 1)
+            .addPartitionSpec(PartitionSpec.unpartitioned())
+            .addSortOrder(SortOrder.unsorted())
+            .discardChanges()
+            .withMetadataLocation("metadata-location")
+            .build();
+
+    LoadTableResponse response = LoadTableResponse.builder().withTableMetadata(metadata).build();
+
+    String expectedJson =
+        String.format(
+            "{\n"
+                + "  \"metadata-location\" : \"metadata-location\",\n"
+                + "  \"metadata\" : {\n"
+                + "    \"format-version\" : %s,\n"
+                + "    \"table-uuid\" : \"386b9f01-002b-4d8c-b77f-42c3fd3b7c9b\",\n"
+                + "    \"location\" : \"file://location\",\n"
+                + "    \"last-sequence-number\" : 0,\n"
+                + "    \"last-updated-ms\" : %d,\n"
+                + "    \"last-column-id\" : 1,\n"
+                + "    \"current-schema-id\" : 0,\n"
+                + "    \"schemas\" : [ {\n"
+                + "      \"type\" : \"struct\",\n"
+                + "      \"schema-id\" : 0,\n"
+                + "      \"fields\" : [ {\n"
+                + "        \"id\" : 1,\n"
+                + "        \"name\" : \"x\",\n"
+                + "        \"required\" : true,\n"
+                + "        \"type\" : \"long\"\n"
+                + "      } ]\n"
+                + "    } ],\n"
+                + "    \"default-spec-id\" : 0,\n"
+                + "    \"partition-specs\" : [ {\n"
+                + "      \"spec-id\" : 0,\n"
+                + "      \"fields\" : [ ]\n"
+                + "    } ],\n"
+                + "    \"last-partition-id\" : 999,\n"
+                + "    \"default-sort-order-id\" : 0,\n"
+                + "    \"sort-orders\" : [ {\n"
+                + "      \"order-id\" : 0,\n"
+                + "      \"fields\" : [ ]\n"
+                + "    } ],\n"
+                + "    \"properties\" : { },\n"
+                + "    \"current-snapshot-id\" : null,\n"
+                + "    \"next-row-id\" : 0,\n"
+                + "    \"refs\" : { },\n"
+                + "    \"snapshots\" : [ ],\n"
+                + "    \"statistics\" : [ ],\n"
+                + "    \"partition-statistics\" : [ ],\n"
+                + "    \"snapshot-log\" : [ ],\n"
+                + "    \"metadata-log\" : [ ]\n"
+                + "  }\n"
+                + "}",
+            formatVersion, metadata.lastUpdatedMillis());
+
+    String json = LoadTableResponseParser.toJson(response, true);
+    assertThat(json).isEqualTo(expectedJson);
+    // can't do an equality comparison because Schema doesn't implement equals/hashCode
+    assertThat(LoadTableResponseParser.toJson(LoadTableResponseParser.fromJson(json), true))
+        .isEqualTo(expectedJson);
+  }
+
+  @Test
+  public void roundTripSerdeV2() {
+    String uuid = "386b9f01-002b-4d8c-b77f-42c3fd3b7c9b";
+    TableMetadata metadata =
+        TableMetadata.buildFromEmpty(2)
+            .assignUUID(uuid)
+            .setLocation("location")
+            .setCurrentSchema(
+                new Schema(Types.NestedField.required(1, "x", Types.LongType.get())), 1)
+            .addPartitionSpec(PartitionSpec.unpartitioned())
+            .addSortOrder(SortOrder.unsorted())
+            .discardChanges()
+            .withMetadataLocation("metadata-location")
+            .build();
+
+    LoadTableResponse response = LoadTableResponse.builder().withTableMetadata(metadata).build();
+
+    String expectedJson =
+        String.format(
+            "{\n"
+                + "  \"metadata-location\" : \"metadata-location\",\n"
+                + "  \"metadata\" : {\n"
+                + "    \"format-version\" : 2,\n"
+                + "    \"table-uuid\" : \"386b9f01-002b-4d8c-b77f-42c3fd3b7c9b\",\n"
+                + "    \"location\" : \"location\",\n"
+                + "    \"last-sequence-number\" : 0,\n"
+                + "    \"last-updated-ms\" : %d,\n"
+                + "    \"last-column-id\" : 1,\n"
+                + "    \"current-schema-id\" : 0,\n"
+                + "    \"schemas\" : [ {\n"
+                + "      \"type\" : \"struct\",\n"
+                + "      \"schema-id\" : 0,\n"
+                + "      \"fields\" : [ {\n"
+                + "        \"id\" : 1,\n"
+                + "        \"name\" : \"x\",\n"
+                + "        \"required\" : true,\n"
+                + "        \"type\" : \"long\"\n"
+                + "      } ]\n"
+                + "    } ],\n"
+                + "    \"default-spec-id\" : 0,\n"
+                + "    \"partition-specs\" : [ {\n"
+                + "      \"spec-id\" : 0,\n"
+                + "      \"fields\" : [ ]\n"
+                + "    } ],\n"
+                + "    \"last-partition-id\" : 999,\n"
+                + "    \"default-sort-order-id\" : 0,\n"
+                + "    \"sort-orders\" : [ {\n"
+                + "      \"order-id\" : 0,\n"
+                + "      \"fields\" : [ ]\n"
+                + "    } ],\n"
+                + "    \"properties\" : { },\n"
+                + "    \"current-snapshot-id\" : -1,\n"
+                + "    \"refs\" : { },\n"
+                + "    \"snapshots\" : [ ],\n"
+                + "    \"statistics\" : [ ],\n"
+                + "    \"partition-statistics\" : [ ],\n"
+                + "    \"snapshot-log\" : [ ],\n"
+                + "    \"metadata-log\" : [ ]\n"
+                + "  }\n"
+                + "}",
+            metadata.lastUpdatedMillis());
+
+    String json = LoadTableResponseParser.toJson(response, true);
+    assertThat(json).isEqualTo(expectedJson);
+    // can't do an equality comparison because Schema doesn't implement equals/hashCode
+    assertThat(LoadTableResponseParser.toJson(LoadTableResponseParser.fromJson(json), true))
+        .isEqualTo(expectedJson);
+  }
+
+  @Test
+  public void roundTripSerdeWithConfig() {
+    String uuid = "386b9f01-002b-4d8c-b77f-42c3fd3b7c9b";
+    TableMetadata metadata =
+        TableMetadata.buildFromEmpty()
+            .assignUUID(uuid)
+            .setLocation("location")
+            .setCurrentSchema(
+                new Schema(Types.NestedField.required(1, "x", Types.LongType.get())), 1)
+            .addPartitionSpec(PartitionSpec.unpartitioned())
+            .addSortOrder(SortOrder.unsorted())
+            .discardChanges()
+            .withMetadataLocation("metadata-location")
+            .build();
+
+    LoadTableResponse response =
+        LoadTableResponse.builder()
+            .withTableMetadata(metadata)
+            .addAllConfig(ImmutableMap.of("key1", "val1", "key2", "val2"))
+            .build();
+
+    String expectedJson =
+        String.format(
+            "{\n"
+                + "  \"metadata-location\" : \"metadata-location\",\n"
+                + "  \"metadata\" : {\n"
+                + "    \"format-version\" : 2,\n"
+                + "    \"table-uuid\" : \"386b9f01-002b-4d8c-b77f-42c3fd3b7c9b\",\n"
+                + "    \"location\" : \"location\",\n"
+                + "    \"last-sequence-number\" : 0,\n"
+                + "    \"last-updated-ms\" : %d,\n"
+                + "    \"last-column-id\" : 1,\n"
+                + "    \"current-schema-id\" : 0,\n"
+                + "    \"schemas\" : [ {\n"
+                + "      \"type\" : \"struct\",\n"
+                + "      \"schema-id\" : 0,\n"
+                + "      \"fields\" : [ {\n"
+                + "        \"id\" : 1,\n"
+                + "        \"name\" : \"x\",\n"
+                + "        \"required\" : true,\n"
+                + "        \"type\" : \"long\"\n"
+                + "      } ]\n"
+                + "    } ],\n"
+                + "    \"default-spec-id\" : 0,\n"
+                + "    \"partition-specs\" : [ {\n"
+                + "      \"spec-id\" : 0,\n"
+                + "      \"fields\" : [ ]\n"
+                + "    } ],\n"
+                + "    \"last-partition-id\" : 999,\n"
+                + "    \"default-sort-order-id\" : 0,\n"
+                + "    \"sort-orders\" : [ {\n"
+                + "      \"order-id\" : 0,\n"
+                + "      \"fields\" : [ ]\n"
+                + "    } ],\n"
+                + "    \"properties\" : { },\n"
+                + "    \"current-snapshot-id\" : -1,\n"
+                + "    \"refs\" : { },\n"
+                + "    \"snapshots\" : [ ],\n"
+                + "    \"statistics\" : [ ],\n"
+                + "    \"partition-statistics\" : [ ],\n"
+                + "    \"snapshot-log\" : [ ],\n"
+                + "    \"metadata-log\" : [ ]\n"
+                + "  },\n"
+                + "  \"config\" : {\n"
+                + "    \"key1\" : \"val1\",\n"
+                + "    \"key2\" : \"val2\"\n"
+                + "  }\n"
+                + "}",
+            metadata.lastUpdatedMillis());
+
+    String json = LoadTableResponseParser.toJson(response, true);
+    assertThat(json).isEqualTo(expectedJson);
+    // can't do an equality comparison because Schema doesn't implement equals/hashCode
+    assertThat(LoadTableResponseParser.toJson(LoadTableResponseParser.fromJson(json), true))
+        .isEqualTo(expectedJson);
+  }
+
+  @Test
+  public void roundTripSerdeWithRemoteSigningConfig() {
+    String uuid = "386b9f01-002b-4d8c-b77f-42c3fd3b7c9b";
+    TableMetadata metadata =
+        TableMetadata.buildFromEmpty()
+            .assignUUID(uuid)
+            .setLocation("location")
+            .setCurrentSchema(
+                new Schema(Types.NestedField.required(1, "x", Types.LongType.get())), 1)
+            .addPartitionSpec(PartitionSpec.unpartitioned())
+            .addSortOrder(SortOrder.unsorted())
+            .discardChanges()
+            .withMetadataLocation("metadata-location")
+            .build();
+
+    LoadTableResponse response =
+        LoadTableResponse.builder()
+            .withTableMetadata(metadata)
+            .withRemoteSigningConfig(
+                ImmutableRemoteSigningConfig.builder()
+                    .properties(Map.of("prop1", "val1"))
+                    .headers(
+                        Map.of(
+                            "Authorization",
+                            List.of("Bearer token123"),
+                            "X-Multi",
+                            List.of("a", "b")))
+                    .build())
+            .build();
+
+    String json = LoadTableResponseParser.toJson(response, true);
+    assertThat(json).contains("\"remote-signing-config\"");
+    assertThat(json).contains("\"prop1\" : \"val1\"");
+    assertThat(json).contains("\"Authorization\" : [ \"Bearer token123\" ]");
+    assertThat(json).contains("\"X-Multi\" : [ \"a\", \"b\" ]");
+
+    LoadTableResponse roundTripped = LoadTableResponseParser.fromJson(json);
+    assertThat(roundTripped.remoteSigningConfig()).isNotNull();
+    assertThat(roundTripped.remoteSigningConfig().properties()).hasSize(1);
+    assertThat(roundTripped.remoteSigningConfig().properties()).containsEntry("prop1", "val1");
+    assertThat(roundTripped.remoteSigningConfig().headers()).hasSize(2);
+    assertThat(roundTripped.remoteSigningConfig().headers())
+        .containsEntry("Authorization", List.of("Bearer token123"));
+    assertThat(roundTripped.remoteSigningConfig().headers())
+        .containsEntry("X-Multi", List.of("a", "b"));
+  }
+
+  @Test
+  public void roundTripSerdeWithEmptyRemoteSigningConfig() {
+    String uuid = "386b9f01-002b-4d8c-b77f-42c3fd3b7c9b";
+    TableMetadata metadata =
+        TableMetadata.buildFromEmpty()
+            .assignUUID(uuid)
+            .setLocation("location")
+            .setCurrentSchema(
+                new Schema(Types.NestedField.required(1, "x", Types.LongType.get())), 1)
+            .addPartitionSpec(PartitionSpec.unpartitioned())
+            .addSortOrder(SortOrder.unsorted())
+            .discardChanges()
+            .withMetadataLocation("metadata-location")
+            .build();
+
+    LoadTableResponse response =
+        LoadTableResponse.builder()
+            .withTableMetadata(metadata)
+            .withRemoteSigningConfig(ImmutableRemoteSigningConfig.builder().build())
+            .build();
+
+    String json = LoadTableResponseParser.toJson(response, true);
+    assertThat(json).doesNotContain("remote-signing-config");
+
+    LoadTableResponse roundTripped = LoadTableResponseParser.fromJson(json);
+    assertThat(roundTripped.remoteSigningConfig()).isNotNull();
+    assertThat(roundTripped.remoteSigningConfig().isEmpty()).isTrue();
+  }
+
+  @Test
+  public void roundTripSerdeWithCredentials() {
+    String uuid = "386b9f01-002b-4d8c-b77f-42c3fd3b7c9b";
+    TableMetadata metadata =
+        TableMetadata.buildFromEmpty()
+            .assignUUID(uuid)
+            .setLocation("location")
+            .setCurrentSchema(
+                new Schema(Types.NestedField.required(1, "x", Types.LongType.get())), 1)
+            .addPartitionSpec(PartitionSpec.unpartitioned())
+            .addSortOrder(SortOrder.unsorted())
+            .discardChanges()
+            .withMetadataLocation("metadata-location")
+            .build();
+
+    LoadTableResponse response =
+        LoadTableResponse.builder()
+            .withTableMetadata(metadata)
+            .addAllConfig(ImmutableMap.of("key1", "val1", "key2", "val2"))
+            .addCredential(
+                ImmutableCredential.builder()
+                    .prefix("s3://custom-uri")
+                    .config(
+                        ImmutableMap.of(
+                            "s3.access-key-id",
+                            "keyId",
+                            "s3.secret-access-key",
+                            "accessKey",
+                            "s3.session-token",
+                            "sessionToken"))
+                    .build())
+            .addCredential(
+                ImmutableCredential.builder()
+                    .prefix("gs://custom-uri")
+                    .config(
+                        ImmutableMap.of(
+                            "gcs.oauth2.token", "gcsToken1", "gcs.oauth2.token-expires-at", "1000"))
+                    .build())
+            .addCredential(
+                ImmutableCredential.builder()
+                    .prefix("gs")
+                    .config(
+                        ImmutableMap.of(
+                            "gcs.oauth2.token", "gcsToken2", "gcs.oauth2.token-expires-at", "2000"))
+                    .build())
+            .build();
+
+    String expectedJson =
+        String.format(
+            "{\n"
+                + "  \"metadata-location\" : \"metadata-location\",\n"
+                + "  \"metadata\" : {\n"
+                + "    \"format-version\" : 2,\n"
+                + "    \"table-uuid\" : \"386b9f01-002b-4d8c-b77f-42c3fd3b7c9b\",\n"
+                + "    \"location\" : \"location\",\n"
+                + "    \"last-sequence-number\" : 0,\n"
+                + "    \"last-updated-ms\" : %s,\n"
+                + "    \"last-column-id\" : 1,\n"
+                + "    \"current-schema-id\" : 0,\n"
+                + "    \"schemas\" : [ {\n"
+                + "      \"type\" : \"struct\",\n"
+                + "      \"schema-id\" : 0,\n"
+                + "      \"fields\" : [ {\n"
+                + "        \"id\" : 1,\n"
+                + "        \"name\" : \"x\",\n"
+                + "        \"required\" : true,\n"
+                + "        \"type\" : \"long\"\n"
+                + "      } ]\n"
+                + "    } ],\n"
+                + "    \"default-spec-id\" : 0,\n"
+                + "    \"partition-specs\" : [ {\n"
+                + "      \"spec-id\" : 0,\n"
+                + "      \"fields\" : [ ]\n"
+                + "    } ],\n"
+                + "    \"last-partition-id\" : 999,\n"
+                + "    \"default-sort-order-id\" : 0,\n"
+                + "    \"sort-orders\" : [ {\n"
+                + "      \"order-id\" : 0,\n"
+                + "      \"fields\" : [ ]\n"
+                + "    } ],\n"
+                + "    \"properties\" : { },\n"
+                + "    \"current-snapshot-id\" : -1,\n"
+                + "    \"refs\" : { },\n"
+                + "    \"snapshots\" : [ ],\n"
+                + "    \"statistics\" : [ ],\n"
+                + "    \"partition-statistics\" : [ ],\n"
+                + "    \"snapshot-log\" : [ ],\n"
+                + "    \"metadata-log\" : [ ]\n"
+                + "  },\n"
+                + "  \"config\" : {\n"
+                + "    \"key1\" : \"val1\",\n"
+                + "    \"key2\" : \"val2\"\n"
+                + "  },\n"
+                + "  \"storage-credentials\" : [ {\n"
+                + "    \"prefix\" : \"s3://custom-uri\",\n"
+                + "    \"config\" : {\n"
+                + "      \"s3.access-key-id\" : \"keyId\",\n"
+                + "      \"s3.secret-access-key\" : \"accessKey\",\n"
+                + "      \"s3.session-token\" : \"sessionToken\"\n"
+                + "    }\n"
+                + "  }, {\n"
+                + "    \"prefix\" : \"gs://custom-uri\",\n"
+                + "    \"config\" : {\n"
+                + "      \"gcs.oauth2.token\" : \"gcsToken1\",\n"
+                + "      \"gcs.oauth2.token-expires-at\" : \"1000\"\n"
+                + "    }\n"
+                + "  }, {\n"
+                + "    \"prefix\" : \"gs\",\n"
+                + "    \"config\" : {\n"
+                + "      \"gcs.oauth2.token\" : \"gcsToken2\",\n"
+                + "      \"gcs.oauth2.token-expires-at\" : \"2000\"\n"
+                + "    }\n"
+                + "  } ]\n"
+                + "}",
+            metadata.lastUpdatedMillis());
+
+    String json = LoadTableResponseParser.toJson(response, true);
+    assertThat(json).isEqualTo(expectedJson);
+    // can't do an equality comparison because Schema doesn't implement equals/hashCode
+    assertThat(LoadTableResponseParser.toJson(LoadTableResponseParser.fromJson(json), true))
+        .isEqualTo(expectedJson);
+  }
+
+  @Test
+  public void roundTripSerdeWithLabels() {
+    String uuid = "386b9f01-002b-4d8c-b77f-42c3fd3b7c9b";
+    TableMetadata metadata =
+        TableMetadata.buildFromEmpty()
+            .assignUUID(uuid)
+            .setLocation("location")
+            .setCurrentSchema(
+                new Schema(Types.NestedField.required(1, "x", Types.LongType.get())), 1)
+            .addPartitionSpec(PartitionSpec.unpartitioned())
+            .addSortOrder(SortOrder.unsorted())
+            .discardChanges()
+            .withMetadataLocation("metadata-location")
+            .build();
+
+    LoadTableResponse response =
+        LoadTableResponse.builder()
+            .withTableMetadata(metadata)
+            .withLabels(
+                ImmutableLabels.builder()
+                    .objectLabels(ImmutableMap.of("owner", "team-a"))
+                    .addFields(
+                        ImmutableFieldLabel.builder()
+                            .fieldId(1)
+                            .labels(ImmutableMap.of("classification", "pii"))
+                            .build())
+                    .build())
+            .build();
+
+    String expectedJson =
+        String.format(
+            """
+            {
+              "metadata-location" : "metadata-location",
+              "metadata" : {
+                "format-version" : 2,
+                "table-uuid" : "386b9f01-002b-4d8c-b77f-42c3fd3b7c9b",
+                "location" : "location",
+                "last-sequence-number" : 0,
+                "last-updated-ms" : %d,
+                "last-column-id" : 1,
+                "current-schema-id" : 0,
+                "schemas" : [ {
+                  "type" : "struct",
+                  "schema-id" : 0,
+                  "fields" : [ {
+                    "id" : 1,
+                    "name" : "x",
+                    "required" : true,
+                    "type" : "long"
+                  } ]
+                } ],
+                "default-spec-id" : 0,
+                "partition-specs" : [ {
+                  "spec-id" : 0,
+                  "fields" : [ ]
+                } ],
+                "last-partition-id" : 999,
+                "default-sort-order-id" : 0,
+                "sort-orders" : [ {
+                  "order-id" : 0,
+                  "fields" : [ ]
+                } ],
+                "properties" : { },
+                "current-snapshot-id" : -1,
+                "refs" : { },
+                "snapshots" : [ ],
+                "statistics" : [ ],
+                "partition-statistics" : [ ],
+                "snapshot-log" : [ ],
+                "metadata-log" : [ ]
+              },
+              "labels" : {
+                "object-labels" : {
+                  "owner" : "team-a"
+                },
+                "fields" : [ {
+                  "field-id" : 1,
+                  "labels" : {
+                    "classification" : "pii"
+                  }
+                } ]
+              }
+            }""",
+            metadata.lastUpdatedMillis());
+
+    String json = LoadTableResponseParser.toJson(response, true);
+    assertThat(json).isEqualTo(expectedJson);
+    // can't do an equality comparison because Schema doesn't implement equals/hashCode
+    assertThat(LoadTableResponseParser.toJson(LoadTableResponseParser.fromJson(json), true))
+        .isEqualTo(expectedJson);
+  }
+
+  @Test
+  public void labelsAreOptional() {
+    String uuid = "386b9f01-002b-4d8c-b77f-42c3fd3b7c9b";
+    TableMetadata metadata =
+        TableMetadata.buildFromEmpty()
+            .assignUUID(uuid)
+            .setLocation("location")
+            .setCurrentSchema(
+                new Schema(Types.NestedField.required(1, "x", Types.LongType.get())), 1)
+            .addPartitionSpec(PartitionSpec.unpartitioned())
+            .addSortOrder(SortOrder.unsorted())
+            .discardChanges()
+            .withMetadataLocation("metadata-location")
+            .build();
+
+    LoadTableResponse response = LoadTableResponse.builder().withTableMetadata(metadata).build();
+
+    String json = LoadTableResponseParser.toJson(response, true);
+    assertThat(json).doesNotContain("labels");
+    assertThat(LoadTableResponseParser.fromJson(json).labels().isEmpty()).isTrue();
+  }
+}
